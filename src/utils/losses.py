@@ -295,7 +295,7 @@ class CombinedLoss(nn.Module):
             "weight_CE": weights["weight_0"],
             "weight_Dice": weights["weight_1"],
             "weight_Physics": weights["weight_2"],
-            "weight_Smoothness": weights["weight_3"],
+            "weight_Smoothness": weights["weight_3"]
         }
 
     def get_current_class_weights(self) -> Dict[str, float]:

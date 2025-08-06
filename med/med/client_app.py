@@ -335,9 +335,9 @@ class FlowerClient(NumPyClient):
                                 in_channels_maxwell=1024,
                                 NUM_CLASSES=4,
                                 lambda_val=15.0,
-                                initial_loss_weights=[0.3, 0.5, 0.5, 1.0, 0.5],
-                                class_indices_for_rules=).to(DEVICE)
-        
+                                initial_loss_weights=[0.3, 0.5, 0.5, 1.0]
+                                ).to(DEVICE)
+
         def calculate_loss(outputs, labels):
             """Calculate loss based on available loss type."""
             # Handle tuple outputs from RobustMedVFL_UNet
@@ -376,7 +376,6 @@ class FlowerClient(NumPyClient):
             lr=self.experiment_config.learning_rate
         )
         
-
         # Training metrics
         training_metrics = {
             "epochs_completed": 0,

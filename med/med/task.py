@@ -76,7 +76,13 @@ def train(net, trainloader, epochs, device, learning_rate=1e-3, kappa_values=Non
     
     # Use advanced adaptive loss for medical segmentation
     
-    criterion = CombinedLoss(num_classes=N_CLASSES, in_channels_maxwell=1024).to(device)
+    criterion = CombinedLoss(num_classes=N_CLASSES, 
+                                in_channels_maxwell=1024,
+                                NUM_CLASSES=4,
+                                lambda_val=15.0,
+                                initial_loss_weights=[0.3, 0.5, 0.5, 1.0]
+                                ).to(device)
+    
     logger.info(f"Using Combined Loss with kappa values: {kappa_values}")
     optimizer = torch.optim.Adam(
         net.parameters(), 
@@ -119,6 +125,15 @@ def train(net, trainloader, epochs, device, learning_rate=1e-3, kappa_values=Non
             
             running_loss += loss.item()
             num_batches += 1
+
+        # Lấy trọng số cân bằng giữa các loss
+        loss_weights = criterion.get_current_loss_weights() 
+        # Lấy trọng số của các class
+        class_weights = criterion.get_current_class_weights()
+
+        # In ra để theo dõi
+        print("Current Loss Weights:", loss_weights)
+        print("Current Class Weights:", class_weights)
     
     avg_trainloss = running_loss / max(num_batches, 1)
     return avg_trainloss
