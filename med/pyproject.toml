@@ -49,14 +49,14 @@ learning-rate = 1e-4
 experiment-name = "ACDC_Medical_FL"
 partition-strategy = "non-iid"    
 alpha = 0.5
-min-fit-clients = 2
-min-available-clients = 2
+min-fit-clients = 1
+min-available-clients = 1
 
 [tool.flwr.federations]
 default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 2
+options.num-supernodes = 1
 options.backend.client-resources.num-cpus = 1
 options.backend.client-resources.num-gpus = 0
 options.backend.config.memory = 8000000000
