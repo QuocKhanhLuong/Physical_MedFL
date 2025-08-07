@@ -46,7 +46,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class ExperimentConfig:
-    """Experiment configuration management."""
+    """Research-grade experiment configuration management."""
 
     def __init__(
         self,
@@ -90,7 +90,7 @@ class ExperimentConfig:
 
 
 class MetricsTracker:
-    """Metrics tracking for FL research."""
+    """Advanced metrics tracking for research purposes."""
 
     def __init__(self, client_id: str, experiment_config: ExperimentConfig):
         self.client_id = client_id
@@ -100,7 +100,7 @@ class MetricsTracker:
         self.convergence_data: List[Dict[str, Any]] = []
 
     def log_round_start(self, server_round: int, global_parameters_norm: float) -> None:
-        """Log round start info."""
+        """Log round start information."""
         round_data = {
             "round": server_round,
             "timestamp": datetime.now().isoformat(),
@@ -116,7 +116,7 @@ class MetricsTracker:
         validation_metrics: Dict,
         computational_metrics: Dict
     ) -> None:
-        """Log comprehensive metrics."""
+        """Log comprehensive metrics for a round."""
         round_data = {
             "round": server_round,
             "timestamp": datetime.now().isoformat(),
@@ -233,7 +233,7 @@ class MetricsTracker:
 
 
 class FlowerClient(NumPyClient):
-    """Flower client with comprehensive tracking."""
+    """Research-grade Flower client with comprehensive tracking and FAUP support."""
 
     def __init__(
         self,
@@ -280,7 +280,7 @@ class FlowerClient(NumPyClient):
         )
 
     def _setup_reproducibility(self) -> None:
-        """Setup reproducible training."""
+        """Setup reproducible training environment."""
         torch.manual_seed(self.experiment_config.seed)
         np.random.seed(self.experiment_config.seed)
         torch.backends.cudnn.deterministic = True
@@ -325,30 +325,57 @@ class FlowerClient(NumPyClient):
         }
 
     def _train_local_advanced(self, epochs: int, kappa_values: Optional[List[float]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Advanced local training with metrics."""
+        """Advanced local training with comprehensive metrics."""
         start_time = time.time()
         initial_params = self.get_parameters({})
 
+        # Setup loss function - prioritize CombinedLoss for physics-informed training
         # Use CombinedLoss for physics-informed model
         criterion = CombinedLoss(num_classes=NUM_CLASSES, 
-                                in_channels_maxwell=1024).to(DEVICE)
-        
+                                in_channels_maxwell=1024,
+                                NUM_CLASSES=4,
+                                lambda_val=15.0,
+                                initial_loss_weights=[0.3, 0.5, 0.5, 1.0]
+                                ).to(DEVICE)
+
         def calculate_loss(outputs, labels):
-            """Calculate physics-informed loss."""
+            """Calculate loss based on available loss type."""
+            # Handle tuple outputs from RobustMedVFL_UNet
             if isinstance(outputs, tuple):
                 logits, maxwell_outputs = outputs
-                # Use physics components
-                return criterion(logits, labels, b1=logits, all_es=maxwell_outputs, feat_sm=logits)
             else:
-                # Standard loss
-                return criterion(outputs, labels)
+                logits = outputs
+                maxwell_outputs = None
+            
+            if use_advanced_loss and criterion is not None:
+                # Use CombinedLoss with physics components
+                if maxwell_outputs is not None:
+                    # Use physics loss with Maxwell outputs
+                    b1 = logits  # Use logits as B1 field approximation
+                    all_es = maxwell_outputs  # Maxwell solver outputs
+                    feat_sm = logits  # Use logits for smoothness regularization
+                    return criterion(logits, labels, b1=b1, all_es=all_es, feat_sm=feat_sm)
+                else:
+                    # Use loss without physics components
+                    return criterion(logits, labels)
+            else:
+                # Dynamic weighted loss calculation
+                assert base_criterion is not None and dynamic_weighter is not None
+                base_losses = base_criterion(logits, labels)
+                class_losses = []
+                for c in range(NUM_CLASSES):
+                    class_mask = (labels == c)
+                    if class_mask.sum() > 0:
+                        class_losses.append(base_losses[class_mask].mean())
+                    else:
+                        class_losses.append(torch.tensor(0.0, device=DEVICE))
+                return dynamic_weighter(class_losses)
 
         optimizer = torch.optim.Adam(
             self.net.parameters(),
             lr=self.experiment_config.learning_rate
         )
         
-
         # Training metrics
         training_metrics = {
             "epochs_completed": 0,
@@ -455,7 +482,7 @@ class FlowerClient(NumPyClient):
         return (initial_loss - final_loss) / initial_loss
 
     def _evaluate_local_advanced(self) -> Dict[str, Any]:
-        """Advanced local evaluation."""
+        """Advanced local evaluation with comprehensive metrics."""
         metrics = evaluate_metrics(self.net, self.valloader, DEVICE, NUM_CLASSES)
 
         # Calculate comprehensive validation metrics
@@ -486,7 +513,7 @@ class FlowerClient(NumPyClient):
         return validation_metrics
 
     def fit(self, parameters: NDArrays, config: Dict[str, Scalar]) -> Tuple[NDArrays, int, Dict[str, Scalar]]:
-        """Fit method with FAUP support."""
+        """Research-grade fit method with FAUP support."""
         self.round_count += 1
         server_round = int(config.get("server_round", self.round_count))
 
@@ -542,7 +569,7 @@ class FlowerClient(NumPyClient):
         return new_parameters, num_examples, client_metrics
 
     def evaluate(self, parameters: NDArrays, config: Dict[str, Scalar]) -> Tuple[float, int, Dict[str, Scalar]]:
-        """Evaluate method."""
+        """Research-grade evaluate method."""
 
         # Update adaptive loss parameters from server if provided
         if "kappa_values" in config:
