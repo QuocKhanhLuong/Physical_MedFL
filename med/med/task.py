@@ -105,14 +105,25 @@ def train(net, trainloader, epochs, device, learning_rate=1e-4, kappa_values=Non
             # RobustMedVFL_UNet always returns (logits, maxwell_outputs)
             logits, maxwell_outputs = outputs
             
-            # HYBRID LOSS: Physics-informed + Stable CrossEntropy
-            loss_combined = criterion_combined(logits, labels.long(), b1=logits, all_es=maxwell_outputs, feat_sm=logits)
-            loss_ce = criterion_ce(logits, labels.long())
+            # # HYBRID LOSS: Physics-informed + Stable CrossEntropy
+            # loss_combined = criterion_combined(logits, labels.long(), b1=logits, all_es=maxwell_outputs, feat_sm=logits)
+            # loss_ce = criterion_ce(logits, labels.long())
             
-            # 70% physics + 30% stable (prevents client drift)
-            loss = 0.7 * loss_combined + 0.3 * loss_ce
+            # # 70% physics + 30% stable (prevents client drift)
+            # loss = 0.7 * loss_combined + 0.3 * loss_ce
+            # TẠM THỜI THAY THẾ BẰNG CODE BÊN DƯỚI ĐỂ DEBUG
+            from monai.losses import DiceLoss, DiceCELoss
+
+            # Khởi tạo loss đơn giản
+            # to_onehot_y=True sẽ chuyển labels (ví dụ: [0, 1, 2]) thành one-hot
+            # softmax=True sẽ áp dụng softmax lên logits trước khi tính loss
+            dice_ce_loss = DiceCELoss(to_onehot_y=True, softmax=True)
+
+            # Tính loss
+            loss = dice_ce_loss(logits, labels.unsqueeze(1)) # unsqueeze(1) có thể cần thiết nếu labels có shape [B, H, W]
             
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
             optimizer.step()
             
             running_loss += loss.item()
