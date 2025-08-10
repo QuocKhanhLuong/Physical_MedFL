@@ -329,6 +329,7 @@ class AdaFedAdamStrategy(FedAvg):
         self.lambda_val = lambda_val
         self.kappa_values = np.ones(num_classes) * lambda_val
         self.experiment_tracker = ExperimentTracker(experiment_name, "AdaFedAdamStrategy")
+        # FIX: Initialize current_parameters properly after super().__init__()
         self.current_parameters = self.initial_parameters
         logging.info("Unified Fairness Strategy initialized with enhanced metrics aggregation")
 
@@ -347,7 +348,11 @@ class AdaFedAdamStrategy(FedAvg):
         
         selected_cids = {c.cid for c in selected_clients}
         for client in available_clients:
-            self.client_debts[client.cid] = 0 if client.cid in selected_cids else self.client_debts[client.cid] + 1
+            if client.cid in selected_cids:
+                # FIX: Reduce debt gradually instead of resetting to 0 for better fairness
+                self.client_debts[client.cid] = max(0, self.client_debts[client.cid] - 2)
+            else:
+                self.client_debts[client.cid] = self.client_debts[client.cid] + 1
             
         config = {}
         if self.on_fit_config_fn:
@@ -383,8 +388,8 @@ class AdaFedAdamStrategy(FedAvg):
         pseudo_gradient = [-np.sum([u[i] for u in client_updates], axis=0) for i in range(len(current_weights))]
         flat_pseudo_gradient = self._flatten_ndarrays(pseudo_gradient)
         flat_client_deltas = [self._flatten_ndarrays(u) for u in client_updates]
-        variance, similarities = self._calculate_update_variance(flat_client_deltas, flat_pseudo_gradient)
-        self.eta = self._adapt_learning_rate(variance)
+        variance, similarities = self.get_variance(flat_client_deltas, flat_pseudo_gradient)
+        self.eta = self.adapt_lr(variance)
         
         if self.m_t is None or self.v_t is None:
             self.m_t = [np.zeros_like(p) for p in pseudo_gradient]
@@ -429,7 +434,9 @@ class AdaFedAdamStrategy(FedAvg):
                     class_dice_scores[i].append(float(score))
                 
         avg_class_dice = [float(np.mean(scores)) if scores else 0.0 for scores in class_dice_scores]
-        self.kappa_values = self.lambda_val * (1.0 - np.array(avg_class_dice))
+        # FIX: Prevent negative kappa values by clipping dice scores to [0, 1]
+        clipped_dice = np.clip(avg_class_dice, 0.0, 1.0)
+        self.kappa_values = self.lambda_val * (1.0 - clipped_dice)
         
         # Enhanced logging with detailed metrics
         avg_class_dice_floats = [float(x) for x in avg_class_dice]  # Ensure proper typing
@@ -579,7 +586,7 @@ class AdaFedAdamStrategy(FedAvg):
         if metrics_collector['foreground_dice']:
             fg_dice = metrics_collector['foreground_dice']
             # Gini coefficient for fairness measurement
-            aggregated["dice_gini_coefficient"] = self._calculate_gini_coefficient(fg_dice)
+            aggregated["dice_gini_coefficient"] = self.get_gini(fg_dice)
             # Performance gap (max - min)
             aggregated["dice_performance_gap"] = float(np.max(fg_dice) - np.min(fg_dice))
         
@@ -679,16 +686,34 @@ class AdaFedAdamStrategy(FedAvg):
     def _flatten_ndarrays(self, ndarrays: NDArrays) -> np.ndarray:
         return np.concatenate([arr.flatten() for arr in ndarrays])
 
-    def _calculate_update_variance(self, client_deltas: List[np.ndarray], pseudo_gradient: np.ndarray) -> Tuple[float, List[float]]:
-        if not client_deltas or np.linalg.norm(pseudo_gradient) < self.tau: return 0.0, []
+    def get_variance(self, client_deltas: List[np.ndarray], pseudo_gradient: np.ndarray) -> Tuple[float, List[float]]:
+        if not client_deltas:
+            return 0.0, []
+        
+        pseudo_norm = np.linalg.norm(pseudo_gradient)
+        # FIX: Use smaller threshold and add fallback for very small gradients
+        min_threshold = max(self.tau, 1e-12)
+        
+        if pseudo_norm < min_threshold:
+            # When pseudo gradient is very small, return small variance to maintain learning
+            return 0.01, []
+            
         similarities = []
         for delta in client_deltas:
-            if np.linalg.norm(delta) > self.tau:
-                sim = np.dot(delta, pseudo_gradient) / (np.linalg.norm(delta) * np.linalg.norm(pseudo_gradient))
+            delta_norm = np.linalg.norm(delta)
+            if delta_norm > min_threshold:
+                sim = np.dot(delta, pseudo_gradient) / (delta_norm * pseudo_norm)
+                # Clip similarity to [-1, 1] for numerical stability
+                sim = np.clip(sim, -1.0, 1.0)
                 similarities.append(sim)
-        return float(np.var(similarities)) if similarities else 0.0, similarities
+        
+        if not similarities:
+            return 0.01, []  # Small variance instead of 0 to maintain adaptation
+            
+        variance = float(np.var(similarities))
+        return max(variance, 1e-8), similarities  # Ensure minimum variance
 
-    def _adapt_learning_rate(self, variance: float) -> float:
+    def adapt_lr(self, variance: float) -> float:
         return self.initial_eta / (1.0 + self.eta_adapt_rate * variance)
 
     def export_research_data(self, output_dir: Optional[str] = None) -> Dict[str, str]:
@@ -698,7 +723,7 @@ class AdaFedAdamStrategy(FedAvg):
         if debt_data: pd.DataFrame(debt_data).to_csv(export_dir / "faup_final_debts.csv", index=False)
         return exported_files
 
-    def _calculate_gini_coefficient(self, values: List[float]) -> float:
+    def get_gini(self, values: List[float]) -> float:
         """Calculate Gini coefficient to measure performance inequality across clients."""
         if len(values) <= 1:
             return 0.0
