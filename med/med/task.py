@@ -23,6 +23,63 @@ from data_handling.data_loader import get_federated_dataloaders
 from utils.metrics import evaluate_metrics
 from utils.losses import CombinedLoss 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SimpleDiceLoss(nn.Module):
+    """
+    Một hàm Dice Loss đơn giản, không có trạng thái, chỉ dùng PyTorch.
+    """
+    def __init__(self, num_classes=4, epsilon=1e-6):
+        super(SimpleDiceLoss, self).__init__()
+        self.num_classes = num_classes
+        self.epsilon = epsilon
+
+    def forward(self, logits, targets):
+        # 1. Áp dụng softmax để lấy xác suất
+        probs = F.softmax(logits, dim=1)
+
+        # 2. Chuyển target sang dạng one-hot
+        # targets shape: [B, H, W] -> [B, 1, H, W]
+        targets_one_hot = F.one_hot(targets.long(), num_classes=self.num_classes)
+        # Permute để có shape [B, C, H, W] giống như probs
+        targets_one_hot = targets_one_hot.permute(0, 3, 1, 2).float()
+
+        # 3. Tính toán Dice cho từng lớp và lấy trung bình
+        total_dice_loss = 0.0
+        for i in range(self.num_classes):
+            pred_class = probs[:, i, :, :]
+            target_class = targets_one_hot[:, i, :, :]
+
+            intersection = torch.sum(pred_class * target_class)
+            union = torch.sum(pred_class) + torch.sum(target_class)
+
+            dice_score = (2. * intersection + self.epsilon) / (union + self.epsilon)
+            total_dice_loss += (1.0 - dice_score)
+
+        return total_dice_loss / self.num_classes
+
+class SimpleDiceCELoss(nn.Module):
+    """
+    Kết hợp SimpleDiceLoss và CrossEntropyLoss tiêu chuẩn.
+    Đây là phiên bản thay thế hoàn hảo cho DiceCELoss của MONAI.
+    """
+    def __init__(self, num_classes=4, weight_dice=0.5, weight_ce=0.5):
+        super(SimpleDiceCELoss, self).__init__()
+        self.dice_loss = SimpleDiceLoss(num_classes=num_classes)
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.weight_dice = weight_dice
+        self.weight_ce = weight_ce
+
+    def forward(self, logits, targets):
+        # Tính toán từng thành phần loss
+        loss_d = self.dice_loss(logits, targets)
+        loss_c = self.ce_loss(logits, targets.long())
+
+        # Trả về tổng có trọng số
+        return self.weight_dice * loss_d + self.weight_ce * loss_c
+
 # Global config
 N_CLASSES = 4
 IMG_SIZE = 256
@@ -75,13 +132,13 @@ def train(net, trainloader, epochs, device, learning_rate=1e-4, kappa_values=Non
     net.train()
     
     # STEP 1: Dual loss approach to stabilize training
-    criterion_combined = CombinedLoss(num_classes=N_CLASSES, 
-                                     in_channels_maxwell=1024,
-                                     lambda_val=15.0,
-                                     initial_loss_weights=[0.3, 0.5, 0.5, 1.0]
-                                     ).to(device)
+    # criterion_combined = CombinedLoss(num_classes=N_CLASSES, 
+                                    #  in_channels_maxwell=1024,
+                                    #  lambda_val=15.0,
+                                    #  initial_loss_weights=[0.3, 0.5, 0.5, 1.0]
+                                    #  ).to(device)
     
-    criterion_ce = nn.CrossEntropyLoss().to(device)  # Stable baseline loss
+    # criterion_ce = nn.CrossEntropyLoss().to(device)  # Stable baseline loss
     
     logger.info(f"Using Hybrid Loss (Combined + CE) with kappa values: {kappa_values}")
     
@@ -111,17 +168,14 @@ def train(net, trainloader, epochs, device, learning_rate=1e-4, kappa_values=Non
             
             # # 70% physics + 30% stable (prevents client drift)
             # loss = 0.7 * loss_combined + 0.3 * loss_ce
-            # TẠM THỜI THAY THẾ BẰNG CODE BÊN DƯỚI ĐỂ DEBUG
-            from monai.losses import DiceLoss, DiceCELoss
+            # (Giả sử bạn đã dán 2 class SimpleDiceLoss và SimpleDiceCELoss ở đầu file)
+# Khởi tạo hàm loss stateless của chúng ta
+# criterion là biến chứa model.loss_function được truyền vào
+# Nếu bạn không truyền nó vào, hãy khởi tạo ở đây:
+            criterion = SimpleDiceCELoss(num_classes=net.n_classes) # Lấy số lớp từ model
 
-            # Khởi tạo loss đơn giản
-            # to_onehot_y=True sẽ chuyển labels (ví dụ: [0, 1, 2]) thành one-hot
-            # softmax=True sẽ áp dụng softmax lên logits trước khi tính loss
-            dice_ce_loss = DiceCELoss(to_onehot_y=True, softmax=True)
-
-            # Tính loss
-            loss = dice_ce_loss(logits, labels.unsqueeze(1)) # unsqueeze(1) có thể cần thiết nếu labels có shape [B, H, W]
-            
+# Tính toán loss một cách đơn giản và ổn định
+            loss = criterion(logits, labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=10.0)
             optimizer.step()
@@ -129,11 +183,11 @@ def train(net, trainloader, epochs, device, learning_rate=1e-4, kappa_values=Non
             running_loss += loss.item()
             num_batches += 1
 
-        # Log loss weights and class weights for monitoring
-        if hasattr(criterion_combined, 'get_current_loss_weights'):
-            current_loss_weights = criterion_combined.get_current_loss_weights() 
-        if hasattr(criterion_combined, 'get_current_class_weights'):
-            current_class_weights = criterion_combined.get_current_class_weights()
+        # # Log loss weights and class weights for monitoring
+        # if hasattr(criterion_combined, 'get_current_loss_weights'):
+        #     current_loss_weights = criterion_combined.get_current_loss_weights() 
+        # if hasattr(criterion_combined, 'get_current_class_weights'):
+        #     current_class_weights = criterion_combined.get_current_class_weights()
 
     avg_trainloss = running_loss / max(num_batches, 1)
     return avg_trainloss

@@ -17,6 +17,43 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import pytorch_lightning as L
 
+# Dán đoạn code này vào đầu file client_app.py 
+import torch.nn.functional as F
+from typing import Union, Tuple, Any
+class SimpleDiceLoss(nn.Module):
+    def __init__(self, num_classes, epsilon=1e-6):
+        super(SimpleDiceLoss, self).__init__()
+        self.num_classes = num_classes
+        self.epsilon = epsilon
+
+    def forward(self, logits, targets):
+        probs = F.softmax(logits, dim=1)
+        targets_one_hot = F.one_hot(targets.long(), num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+        
+        total_dice_loss = 0.0
+        for i in range(self.num_classes):
+            pred_class = probs[:, i, :, :]
+            target_class = targets_one_hot[:, i, :, :]
+            intersection = torch.sum(pred_class * target_class)
+            union = torch.sum(pred_class) + torch.sum(target_class)
+            dice_score = (2. * intersection + self.epsilon) / (union + self.epsilon)
+            total_dice_loss += (1.0 - dice_score)
+            
+        return total_dice_loss / self.num_classes
+
+class SimpleDiceCELoss(nn.Module):
+    def __init__(self, num_classes, weight_dice=0.5, weight_ce=0.5):
+        super(SimpleDiceCELoss, self).__init__()
+        self.dice_loss = SimpleDiceLoss(num_classes=num_classes)
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.weight_dice = weight_dice
+        self.weight_ce = weight_ce
+
+    def forward(self, logits, targets):
+        loss_d = self.dice_loss(logits, targets)
+        loss_c = self.ce_loss(logits, targets.long())
+        return self.weight_dice * loss_d + self.weight_ce * loss_c
+
 # Add src to path for imports
 import sys
 project_root = Path(__file__).resolve().parents[2]
@@ -77,66 +114,58 @@ class MetricsTracker:
         )
 
 class MedicalModel(L.LightningModule):
-    """Lightning module for multi-GPU medical FL training."""
+    """Lightning module đã được sửa đổi để ổn định hơn."""
     
-    def __init__(self, net: nn.Module, learning_rate: float = 1e-4):
+    def __init__(self, net: nn.Module, learning_rate: float = 1e-4, num_classes: int = 4):
         super().__init__()
         self.net = net
         self.learning_rate = learning_rate
         
-        # Hybrid loss setup
-        self.loss_combined = CombinedLoss(
-            num_classes=NUM_CLASSES,
-            in_channels_maxwell=1024,
-            lambda_val=15.0,
-            initial_loss_weights=[0.3, 0.5, 0.5, 1.0]
-        )
-        self.loss_ce = nn.CrossEntropyLoss()
+        # CHANGED: Thay thế toàn bộ loss phức tạp bằng một loss đơn giản, stateless
+        self.loss_fn = SimpleDiceCELoss(num_classes=num_classes)
         
-        # Metrics tracking
+        # Metrics tracking (không đổi)
         self.loss_before = 0.0
         self.loss_after = 0.0
         self.training_step_outputs = []
 
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, Any]]:
+        # Forward pass của model gốc trả về nhiều giá trị, chúng ta chỉ cần logits cho loss này
+        # Chúng ta sẽ xử lý việc này trong training_step
         return self.net(x)
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         images, labels = batch
-        logits, maxwell_outputs = self(images)
         
-        # Hybrid loss: 70% physics + 30% stable
-        loss_combined = self.loss_combined(logits, labels.long(), b1=logits, all_es=maxwell_outputs, feat_sm=logits)
-        loss_ce = self.loss_ce(logits, labels.long())
-        loss = 0.7 * loss_combined + 0.3 * loss_ce
+        # Model của bạn trả về nhiều outputs, chúng ta chỉ lấy logits
+        outputs = self(images)
+        logits = outputs[0] # Giả định logits là output đầu tiên
         
-        # Store for epoch end
+        # CHANGED: Tính toán loss một cách đơn giản và trực tiếp
+        loss = self.loss_fn(logits, labels)
+        
+        # Store for epoch end (không đổi)
         self.training_step_outputs.append(loss.detach())
         
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def on_train_epoch_end(self) -> None:
-        """Calculate average loss for the epoch."""
         if self.training_step_outputs:
             epoch_loss = torch.stack(self.training_step_outputs).mean()
             self.loss_after = epoch_loss.item()
             self.training_step_outputs.clear()
 
-    def setup_optimizer(self) -> torch.optim.Optimizer:
-        """Setup optimizer - simple name instead of configure_optimizers."""
+    def configure_optimizers(self) -> torch.optim.Optimizer:
+        # Giữ nguyên phần optimizer, weight_decay cũng là một dạng regularization tốt
         return torch.optim.Adam(
             self.parameters(), 
             lr=self.learning_rate, 
             weight_decay=1e-4
         )
-    
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        """Required by Lightning - calls our simple setup_optimizer."""
-        return self.setup_optimizer()
 
     def get_loss_before(self, dataloader: DataLoader) -> float:
-        """Calculate initial loss before training."""
+        """Tính toán loss ban đầu với hàm loss đã được đơn giản hóa."""
         self.eval()
         total_loss = 0.0
         num_batches = 0
@@ -144,11 +173,13 @@ class MedicalModel(L.LightningModule):
         with torch.no_grad():
             for images, labels in dataloader:
                 images, labels = images.to(self.device), labels.to(self.device)
-                logits, maxwell_outputs = self(images)
                 
-                loss_combined = self.loss_combined(logits, labels.long(), b1=logits, all_es=maxwell_outputs, feat_sm=logits)
-                loss_ce = self.loss_ce(logits, labels.long())
-                loss = 0.7 * loss_combined + 0.3 * loss_ce
+                # Model của bạn trả về nhiều outputs, chúng ta chỉ lấy logits
+                outputs = self(images)
+                logits = outputs[0] # Giả định logits là output đầu tiên
+
+                # CHANGED: Tính toán loss một cách đơn giản và trực tiếp
+                loss = self.loss_fn(logits, labels)
                 total_loss += loss.item()
                 num_batches += 1
         
@@ -190,6 +221,7 @@ class MultiGPUTrainer:
             logger=False,
             enable_progress_bar=False,
             sync_batchnorm=sync_batchnorm,
+            gradient_clip_val=1.0,
         )
 
     def fit(self, trainloader: DataLoader) -> float:
